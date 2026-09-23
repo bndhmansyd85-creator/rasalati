@@ -16,25 +16,37 @@ let db = {
   messages: []
 };
 
+// تحميل قاعدة البيانات
 try {
   if (fs.existsSync(DB)) {
     db = JSON.parse(fs.readFileSync(DB, "utf8"));
   }
-} catch {}
+} catch (e) {
+  console.log("Database load error:", e);
+}
 
+// حفظ قاعدة البيانات
 const save = () => {
-  fs.writeFileSync(DB, JSON.stringify(db, null, 2));
+  try {
+    fs.writeFileSync(DB, JSON.stringify(db, null, 2));
+  } catch (e) {
+    console.log("Database save error:", e);
+  }
 };
 
 const online = new Map();
 
 app.use(express.json({ limit: "15mb" }));
 
+// ملفات الموقع
 app.use(express.static(path.join(__dirname, "public")));
 
+// =========================
+// تسجيل مستخدم
+// =========================
 app.post("/api/register", (q, r) => {
-  let name = String(q.body.name || "").trim();
-  let phone = String(q.body.phone || "").trim();
+  const name = String(q.body.name || "").trim();
+  const phone = String(q.body.phone || "").trim();
 
   if (!name || !phone) {
     return r.status(400).json({
@@ -42,10 +54,12 @@ app.post("/api/register", (q, r) => {
     });
   }
 
-  db.users[phone] ??= {
-    phone,
-    created: Date.now()
-  };
+  if (!db.users[phone]) {
+    db.users[phone] = {
+      phone,
+      created: Date.now()
+    };
+  }
 
   db.users[phone].name = name;
 
@@ -56,21 +70,27 @@ app.post("/api/register", (q, r) => {
   });
 });
 
+// =========================
+// جلب الرسائل
+// =========================
 app.get("/api/messages/:p", (q, r) => {
-  let me = q.headers["x-phone"];
-  let p = q.params.p;
+  const me = q.headers["x-phone"];
+  const p = q.params.p;
 
-  r.json(
-    db.messages.filter(
-      m =>
-        (m.from === me && m.to === p) ||
-        (m.from === p && m.to === me)
-    )
+  const messages = db.messages.filter(
+    m =>
+      (m.from === me && m.to === p) ||
+      (m.from === p && m.to === me)
   );
+
+  r.json(messages);
 });
 
+// =========================
+// تحديث الملف الشخصي
+// =========================
 app.post("/api/profile", (q, r) => {
-  let p = q.body.phone;
+  const p = q.body.phone;
 
   if (!db.users[p]) {
     return r.status(404).end();
@@ -80,7 +100,9 @@ app.post("/api/profile", (q, r) => {
     q.body.name || db.users[p].name
   );
 
-  db.users[p].bio = String(q.body.bio || "");
+  db.users[p].bio = String(
+    q.body.bio || ""
+  );
 
   if (q.body.avatar) {
     db.users[p].avatar = String(q.body.avatar).slice(
@@ -94,17 +116,23 @@ app.post("/api/profile", (q, r) => {
   r.json(db.users[p]);
 });
 
+// =========================
+// WebSocket
+// =========================
 wss.on("connection", ws => {
   let me = null;
 
   ws.on("message", raw => {
     try {
-      let x = JSON.parse(raw);
+      const x = JSON.parse(raw);
 
+      // تسجيل الدخول
       if (x.type === "auth") {
-        me = String(x.phone);
+        me = String(x.phone || "");
 
-        online.set(me, ws);
+        if (me) {
+          online.set(me, ws);
+        }
 
         ws.send(
           JSON.stringify({
@@ -115,10 +143,11 @@ wss.on("connection", ws => {
         return;
       }
 
+      // جاري الكتابة
       if (x.type === "typing") {
-        let s = online.get(x.to);
+        const s = online.get(x.to);
 
-        if (s?.readyState === 1) {
+        if (s && s.readyState === WebSocket.OPEN) {
           s.send(
             JSON.stringify({
               type: "typing",
@@ -131,9 +160,12 @@ wss.on("connection", ws => {
         return;
       }
 
+      // قراءة الرسالة
       if (x.type === "read") {
-        let m = db.messages.find(
-          a => a.id === x.id && a.to === me
+        const m = db.messages.find(
+          a =>
+            a.id === x.id &&
+            a.to === me
         );
 
         if (m) {
@@ -144,34 +176,42 @@ wss.on("connection", ws => {
         return;
       }
 
+      // إرسال رسالة
       if (x.type === "message") {
-        let to = String(x.to || "");
-        let text = String(x.text || "");
-        let kind = x.kind || "text";
+        const to = String(x.to || "");
+        const text = String(x.text || "");
+        const kind = x.kind || "text";
 
-        if (!me || !to || (!text && !x.media)) {
+        if (
+          !me ||
+          !to ||
+          (!text && !x.media)
+        ) {
           return;
         }
 
-        let m = {
+        const m = {
           id: crypto.randomUUID(),
           from: me,
-          to,
-          text,
-          kind,
+          to: to,
+          text: text,
+          kind: kind,
           media: x.media || null,
           time: Date.now(),
           read: false
         };
 
         db.messages.push(m);
-
         save();
 
-        for (let p of [to, me]) {
-          let s = online.get(p);
+        // إرسال للمرسل والمستقبل
+        for (const p of [to, me]) {
+          const s = online.get(p);
 
-          if (s?.readyState === 1) {
+          if (
+            s &&
+            s.readyState === WebSocket.OPEN
+          ) {
             s.send(
               JSON.stringify({
                 type: "message",
@@ -180,24 +220,55 @@ wss.on("connection", ws => {
             );
           }
         }
+
+        return;
       }
-    } catch {}
+
+    } catch (e) {
+      console.log("WebSocket error:", e);
+    }
   });
 
   ws.on("close", () => {
-    if (me && online.get(me) === ws) {
+    if (
+      me &&
+      online.get(me) === ws
+    ) {
       online.delete(me);
     }
   });
 });
 
-/* هذا هو السطر الذي تم إصلاحه */
-app.get("/{*splat}", (q, r) =>
-  r.sendFile(
-    path.join(__dirname, "public/index.html")
-  )
-);
+// =========================
+// الصفحة الرئيسية
+// =========================
 
-server.listen(
-  process.env.PORT || 3000
-);
+// مهم جدًا:
+// لا تستخدم app.get("*")
+// لأن Express الحديث يعطي الخطأ الموجود في Render.
+
+app.use((q, r, next) => {
+  if (q.method === "GET") {
+    return r.sendFile(
+      path.join(
+        __dirname,
+        "public",
+        "index.html"
+      )
+    );
+  }
+
+  next();
+});
+
+// =========================
+// تشغيل السيرفر
+// =========================
+
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, () => {
+  console.log(
+    `Rasalati server running on port ${PORT}`
+  );
+});
